@@ -13,7 +13,10 @@ It produces:
     X: sequence features shaped as (samples, sequence_length, keypoints)
     y: one-hot labels shaped as (samples, number_of_actions)
     X_train, X_test, y_train, y_test: train/test partitions
+
 """
+
+
 
 from __future__ import annotations
 
@@ -30,8 +33,8 @@ from tensorflow.keras.utils import to_categorical
 # Preprocessing configuration.
 DATA_PATH = Path("dataset")
 ACTIONS = [
-   "hello",
-    "thank_you",
+    "hello",
+    "thank_you"
     "see_you_later",
     "see",
     "you",
