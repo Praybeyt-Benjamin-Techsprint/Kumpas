@@ -35,6 +35,7 @@ LOG_DIR = os.path.join("Logs", "Train")
 MODELS_DIR = Path("models")
 BEST_MODEL_PATH = MODELS_DIR / "best_model.h5"
 FINAL_MODEL_PATH = MODELS_DIR / "sign_language_model.h5"
+ACTION_MODEL_PATH = MODELS_DIR / "action.h5"
 LABEL_MAP_PATH = MODELS_DIR / "label_map.json"
 DEFAULT_EPOCHS = 100
 
@@ -203,6 +204,7 @@ def train_model(args: argparse.Namespace) -> None:
     )
 
     model.save(str(FINAL_MODEL_PATH))
+    model.save(str(ACTION_MODEL_PATH))
     save_label_map(actions)
 
     final_training_accuracy = history.history["categorical_accuracy"][-1]
@@ -213,6 +215,7 @@ def train_model(args: argparse.Namespace) -> None:
     print("Training Complete")
     print(f"Best Model Saved: {BEST_MODEL_PATH}")
     print(f"Final Model Saved: {FINAL_MODEL_PATH}")
+    print(f"Live Model Saved: {ACTION_MODEL_PATH}")
     print("TensorBoard Command: tensorboard --logdir=Logs/Train")
 
 
