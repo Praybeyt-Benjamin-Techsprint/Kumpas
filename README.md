@@ -1,6 +1,6 @@
 # KUMPAS
 
-> **KUMPAS** is a web-based application that uses **machine learning** to recognize **Filipino Sign Language (FSL)** gestures and translate them into **Filipino (Tagalog)** and various **Philippine languages**, helping bridge communication between the Deaf community and speakers of different local languages.
+> **KUMPAS** is a web-based application that uses **machine learning** to recognize **Sign Language** gestures and translate them into **Filipino (Tagalog)** and various **Philippine languages**, helping bridge communication between the Deaf community and speakers of different local languages.
 
 ---
 
@@ -8,7 +8,7 @@
 
 The Philippines is one of the world's most linguistically diverse countries, with over **180 living languages** spoken across its regions. Despite this diversity, communication barriers continue to exist for members of the Deaf community, especially when interacting with people who speak different Philippine languages.
 
-**KUMPAS** addresses this challenge by combining **machine learning-based Filipino Sign Language recognition** with multilingual translation. Using a webcam, the system recognizes Filipino Sign Language gestures in real time, converts them into Filipino (Tagalog), and translates the output into the user's selected Philippine language.
+**KUMPAS** addresses this challenge by combining **machine learning-based Filipino Sign Language recognition** with multilingual translation. Using a webcam, the system recognizes Filipino Sign Language gestures in real time, converts them into Filipino (Tagalog), and translates the output into the user's selected Philippine language which are: Ilocano, Cebuano, ------.
 
 Our mission is to make communication more inclusive, accessible, and culturally relevant by connecting Filipino Sign Language users with speakers of diverse Philippine languages.
 
@@ -44,6 +44,8 @@ Our mission is to make communication more inclusive, accessible, and culturally 
 
 * React
 * TypeScript
+* vite
+* Tailwind CSS
 
 ## Machine Learning
 
@@ -53,13 +55,14 @@ Our mission is to make communication more inclusive, accessible, and culturally 
 
 ## Translation
 
-* OpenAI API
+* ----------
 
 ## Development Tools
 
 * Git
 * GitHub
 * Visual Studio Code
+* Codex
 
 ---
 
