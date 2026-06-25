@@ -13,7 +13,7 @@ Each .npy file contains one frame of left-hand and right-hand landmarks:
 21 left hand points * 3 coordinates + 21 right hand points * 3 coordinates
 = 126 float32 values.
 """
-
+#STEP 5
 from __future__ import annotations
 
 import argparse

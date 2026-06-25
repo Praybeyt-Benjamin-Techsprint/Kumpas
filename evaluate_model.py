@@ -9,7 +9,7 @@ Workflow:
     -> actions[class_index]
     -> predicted gesture label
 """
-
+#STEP 10
 from __future__ import annotations
 
 import argparse

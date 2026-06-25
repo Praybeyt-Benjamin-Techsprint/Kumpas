@@ -11,7 +11,7 @@ This script demonstrates model persistence for a TensorFlow/Keras LSTM model:
 Full-model loading is the preferred path for inference because it restores the
 architecture and trained weights together, avoiding manual reconstruction.
 """
-
+# STEP 6
 from __future__ import annotations
 
 import argparse

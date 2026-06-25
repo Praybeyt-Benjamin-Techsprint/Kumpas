@@ -8,7 +8,7 @@ For the hand-only collector in this project it is (samples, 30, 126).
 The script infers the actual input shape from the loaded dataset so the same
 training pipeline works for either feature set.
 """
-
+# Step 7
 from __future__ import annotations
 
 import argparse
