@@ -350,12 +350,46 @@ def release_capture(capture: Optional[cv2.VideoCapture]) -> None:
         capture.release()
 
 
-def create_dataset_folders(data_path: Path) -> None:
-    """Create action and sequence folders before recording starts."""
+def existing_sequence_numbers(action_path: Path) -> list[int]:
+    """Return existing numeric sequence folder names for one action."""
+    if not action_path.exists():
+        return []
+
+    sequence_numbers = []
+    for path in action_path.iterdir():
+        if not path.is_dir():
+            continue
+        try:
+            sequence_numbers.append(int(path.name))
+        except ValueError:
+            logging.debug("Ignoring non-numeric sequence folder: %s", path)
+
+    return sorted(sequence_numbers)
+
+
+def create_dataset_folders(data_path: Path) -> dict[str, list[int]]:
+    """Create the next batch of sequence folders without overwriting old data."""
+    collection_plan: dict[str, list[int]] = {}
+
     for action in ACTIONS:
-        for sequence in range(NO_SEQUENCES):
-            (data_path / action / str(sequence)).mkdir(parents=True, exist_ok=True)
+        action_path = data_path / action
+        existing_sequences = existing_sequence_numbers(action_path)
+        start_sequence = existing_sequences[-1] + 1 if existing_sequences else 0
+        new_sequences = list(range(start_sequence, start_sequence + NO_SEQUENCES))
+
+        for sequence in new_sequences:
+            (action_path / str(sequence)).mkdir(parents=True, exist_ok=False)
+
+        collection_plan[action] = new_sequences
+        logging.info(
+            "Gesture=%s new sequence folders: %s-%s",
+            action,
+            new_sequences[0],
+            new_sequences[-1],
+        )
+
     logging.info("Dataset folders are ready under %s", data_path)
+    return collection_plan
 
 
 def mediapipe_detection(image: np.ndarray, holistic_model) -> object:
@@ -431,6 +465,7 @@ def draw_status_overlay(
     image: np.ndarray,
     action: str,
     sequence: int,
+    batch_index: int,
     frame_num: int,
     status: str,
     countdown: Optional[int] = None,
@@ -439,7 +474,7 @@ def draw_status_overlay(
     cv2.rectangle(image, (0, 0), (650, 130), (0, 0, 0), thickness=-1)
     lines = [
         f"Gesture: {action.upper()}",
-        f"Sequence: {sequence + 1} / {NO_SEQUENCES}",
+        f"Seq folder: {sequence} | Batch: {batch_index + 1} / {NO_SEQUENCES}",
         f"Frame: {frame_num + 1} / {SEQUENCE_LENGTH}",
         status if countdown is None else f"{status} {countdown}",
     ]
@@ -470,6 +505,7 @@ def wait_with_countdown(
     args: argparse.Namespace,
     action: str,
     sequence: int,
+    batch_index: int,
     initial_frame: Optional[np.ndarray] = None,
 ) -> bool:
     """Show a get-ready countdown before recording a sequence."""
@@ -499,6 +535,7 @@ def wait_with_countdown(
             frame,
             action,
             sequence,
+            batch_index,
             0,
             "Get Ready:",
             countdown=max(remaining, 1),
@@ -514,13 +551,16 @@ def record_sequence(
     args: argparse.Namespace,
     action: str,
     sequence: int,
+    batch_index: int,
 ) -> bool:
     """Record and save one fixed-length gesture sequence."""
     sequence_path = args.data_path / action / str(sequence)
+    sequence_path.mkdir(parents=True, exist_ok=True)
     logging.info(
-        "Recording gesture=%s sequence=%s/%s",
+        "Recording gesture=%s sequence_folder=%s batch=%s/%s",
         action,
-        sequence + 1,
+        sequence,
+        batch_index + 1,
         NO_SEQUENCES,
     )
 
@@ -534,10 +574,19 @@ def record_sequence(
         results = mediapipe_detection(frame, holistic_model)
         keypoints = extract_hand_keypoints(results)
         file_path = sequence_path / f"{frame_num}.npy"
+        if file_path.exists():
+            raise RuntimeError(f"Refusing to overwrite existing frame file: {file_path}")
         np.save(file_path, keypoints)
 
         draw_detected_landmarks(frame, results)
-        draw_status_overlay(frame, action, sequence, frame_num, "Recording...")
+        draw_status_overlay(
+            frame,
+            action,
+            sequence,
+            batch_index,
+            frame_num,
+            "Recording...",
+        )
 
         hands_detected = sum(
             landmark is not None
@@ -558,7 +607,7 @@ def record_sequence(
 
 def run_collection(args: argparse.Namespace) -> int:
     """Run the full data collection workflow."""
-    create_dataset_folders(args.data_path)
+    collection_plan = create_dataset_folders(args.data_path)
     camera_session = open_working_camera(args)
     capture = camera_session.capture
     mp_holistic = mp.solutions.holistic
@@ -574,15 +623,16 @@ def run_collection(args: argparse.Namespace) -> int:
         min_tracking_confidence=args.min_tracking_confidence,
     ) as holistic_model:
         try:
-            for action in ACTIONS:
+            for action, sequences in collection_plan.items():
                 logging.info("Starting gesture: %s", action)
-                for sequence in range(NO_SEQUENCES):
+                for batch_index, sequence in enumerate(sequences):
                     if not wait_with_countdown(
                         capture,
                         holistic_model,
                         args,
                         action,
                         sequence,
+                        batch_index,
                         initial_frame,
                     ):
                         logging.info("Collection stopped by user.")
@@ -595,6 +645,7 @@ def run_collection(args: argparse.Namespace) -> int:
                         args,
                         action,
                         sequence,
+                        batch_index,
                     ):
                         logging.info("Collection stopped by user.")
                         return 0
