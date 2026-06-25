@@ -9,12 +9,15 @@ extracted landmark keypoints into an LSTM, Transformer, or other classifier.
 from __future__ import annotations
 
 import argparse
+import csv
+import json
 import logging
 import platform
 import sys
 import time
 from collections import deque
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -38,9 +41,14 @@ except ImportError as exc:
     raise SystemExit(1) from exc
 
 
-WINDOW_NAME = "Sign Language Recognition - Press q to quit"
+WINDOW_NAME = "OpenCV Feed"
+DEFAULT_MODEL_PATH = Path("models/action.h5")
+DEFAULT_LABEL_MAP_PATH = Path("models/label_map.json")
+DEFAULT_PREDICTION_LOG_PATH = Path("Logs/predictions.csv")
 DEFAULT_CAMERA_WARMUP_FRAMES = 60
 FRAME_RETRY_DELAY_SECONDS = 0.05
+STABILIZATION_WINDOW = 10
+MAX_SENTENCE_LENGTH = 5
 
 
 class CameraOpenError(RuntimeError):
@@ -72,10 +80,14 @@ class CameraSession:
 
 @dataclass
 class RecognitionState:
-    """Holds the rolling landmark sequence used for model inference."""
+    """Runtime state for real-time gesture recognition."""
 
     sequence: deque[np.ndarray]
-    prediction_text: str = "Model: not loaded"
+    sentence: list[str]
+    predictions: deque[int]
+    probabilities: np.ndarray
+    threshold: float
+    accepted_label: str = ""
     confidence: float = 0.0
 
 
@@ -154,14 +166,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--model-path",
         type=Path,
-        default=None,
-        help="Optional TensorFlow/Keras model path for real-time recognition.",
+        default=DEFAULT_MODEL_PATH,
+        help=f"TensorFlow/Keras model path. Default: {DEFAULT_MODEL_PATH}.",
+    )
+    parser.add_argument(
+        "--label-map-path",
+        type=Path,
+        default=DEFAULT_LABEL_MAP_PATH,
+        help=f"JSON label map from training. Default: {DEFAULT_LABEL_MAP_PATH}.",
     )
     parser.add_argument(
         "--labels-path",
         type=Path,
         default=None,
-        help="Optional text file with one class label per line.",
+        help="Optional fallback text file with one class label per line.",
     )
     parser.add_argument(
         "--sequence-length",
@@ -172,8 +190,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--prediction-threshold",
         type=float,
-        default=0.7,
+        default=0.5,
         help="Minimum model confidence before displaying a class label.",
+    )
+    parser.add_argument(
+        "--prediction-log-path",
+        type=Path,
+        default=DEFAULT_PREDICTION_LOG_PATH,
+        help=f"CSV log path for accepted predictions. Default: {DEFAULT_PREDICTION_LOG_PATH}.",
+    )
+    parser.add_argument(
+        "--disable-threshold-slider",
+        action="store_true",
+        help="Disable the OpenCV confidence threshold slider.",
     )
     return parser.parse_args()
 
@@ -326,7 +355,7 @@ def release_capture(capture: Optional[cv2.VideoCapture]) -> None:
         capture.release()
 
 
-def process_frame(image, holistic_model):
+def mediapipe_detection(image, holistic_model):
     """Run MediaPipe inference on a BGR OpenCV frame."""
     rgb_image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
     rgb_image.flags.writeable = False
@@ -336,41 +365,33 @@ def process_frame(image, holistic_model):
 
 
 def extract_keypoints(results) -> np.ndarray:
-    """Convert MediaPipe pose and hand landmarks into a fixed-size vector."""
-    pose = (
-        np.array(
-            [
-                [landmark.x, landmark.y, landmark.z, landmark.visibility]
-                for landmark in results.pose_landmarks.landmark
-            ]
-        ).flatten()
-        if results.pose_landmarks
-        else np.zeros(33 * 4)
-    )
+    """Extract hand landmarks in the same 126-value format used for training."""
     left_hand = (
         np.array(
             [
                 [landmark.x, landmark.y, landmark.z]
                 for landmark in results.left_hand_landmarks.landmark
-            ]
+            ],
+            dtype=np.float32,
         ).flatten()
         if results.left_hand_landmarks
-        else np.zeros(21 * 3)
+        else np.zeros(21 * 3, dtype=np.float32)
     )
     right_hand = (
         np.array(
             [
                 [landmark.x, landmark.y, landmark.z]
                 for landmark in results.right_hand_landmarks.landmark
-            ]
+            ],
+            dtype=np.float32,
         ).flatten()
         if results.right_hand_landmarks
-        else np.zeros(21 * 3)
+        else np.zeros(21 * 3, dtype=np.float32)
     )
-    return np.concatenate([pose, left_hand, right_hand]).astype(np.float32)
+    return np.concatenate([left_hand, right_hand]).astype(np.float32)
 
 
-def draw_landmarks(image, results, draw_face: bool = False) -> None:
+def draw_styled_landmarks(image, results, draw_face: bool = False) -> None:
     """Draw pose, hand, and optionally face landmarks on the frame."""
     mp_holistic = mp.solutions.holistic
     mp_drawing = mp.solutions.drawing_utils
@@ -417,42 +438,48 @@ def draw_landmarks(image, results, draw_face: bool = False) -> None:
         )
 
 
+# Backward-compatible aliases for notebook-style helper names.
+process_frame = mediapipe_detection
+draw_landmarks = draw_styled_landmarks
+
+
 def add_status_overlay(
-    image,
+    image: np.ndarray,
     results,
     fps: float,
-    recognition_state: Optional[RecognitionState],
+    recognition_state: RecognitionState,
 ) -> None:
-    """Draw lightweight debugging information on the output frame."""
+    """Draw sentence, FPS, hands detected, threshold, and prediction history."""
     hands_detected = sum(
         landmark is not None
         for landmark in (results.left_hand_landmarks, results.right_hand_landmarks)
     )
-    pose_detected = results.pose_landmarks is not None
-    status = f"FPS: {fps:.1f} | Pose: {pose_detected} | Hands: {hands_detected}/2"
-    prediction = (
-        recognition_state.prediction_text
-        if recognition_state is not None
-        else "Model: not loaded"
+    sentence = " ".join(recognition_state.sentence).upper()
+    header = sentence or "..."
+    confidence = int(recognition_state.confidence * 100)
+    accepted = (
+        f"{recognition_state.accepted_label.upper()} ({confidence}%)"
+        if recognition_state.accepted_label
+        else "Waiting for stable prediction"
     )
 
-    cv2.rectangle(image, (0, 0), (640, 72), (0, 0, 0), thickness=-1)
+    cv2.rectangle(image, (0, 0), (image.shape[1], 92), (0, 0, 0), thickness=-1)
     cv2.putText(
         image,
-        status,
-        (12, 26),
+        header,
+        (12, 36),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.7,
+        1.0,
         (255, 255, 255),
         2,
         cv2.LINE_AA,
     )
     cv2.putText(
         image,
-        prediction,
-        (12, 58),
+        f"{accepted} | FPS: {fps:.0f} | Hands: {hands_detected}/2 | Threshold: {recognition_state.threshold:.2f}",
+        (12, 72),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.7,
+        0.65,
         (80, 255, 80),
         2,
         cv2.LINE_AA,
@@ -476,15 +503,29 @@ def load_labels(labels_path: Optional[Path]) -> Optional[list[str]]:
     return labels
 
 
-def load_tensorflow_model(model_path: Optional[Path]) -> Optional[Any]:
-    """Load a TensorFlow/Keras model only when a path is provided."""
-    if model_path is None:
-        return None
+def load_actions(label_map_path: Path, labels_path: Optional[Path]) -> np.ndarray:
+    """Load action labels in the same class-index order used during training."""
+    if label_map_path.exists():
+        label_map = json.loads(label_map_path.read_text(encoding="utf-8"))
+        actions = sorted(label_map, key=label_map.get)
+        return np.array(actions)
+
+    labels = load_labels(labels_path)
+    if labels:
+        return np.array(labels)
+
+    raise RuntimeError(
+        "No labels found. Provide models/label_map.json or pass --labels-path."
+    )
+
+
+def load_tensorflow_model(model_path: Path) -> Any:
+    """Load the trained TensorFlow/Keras LSTM model."""
     if not model_path.exists():
         raise RuntimeError(f"Model path does not exist: {model_path}")
 
     try:
-        import tensorflow as tf
+        from tensorflow.keras.models import load_model
     except ImportError as exc:
         raise RuntimeError(
             "TensorFlow is required when --model-path is provided. "
@@ -492,53 +533,233 @@ def load_tensorflow_model(model_path: Optional[Path]) -> Optional[Any]:
         ) from exc
 
     logging.info("Loading TensorFlow model from %s", model_path)
-    return tf.keras.models.load_model(model_path)
+    return load_model(model_path, compile=False)
+
+
+def generate_colors(num_classes: int) -> list[tuple[int, int, int]]:
+    """Generate stable BGR colors for probability bars."""
+    base_colors = [
+        (245, 117, 16),
+        (117, 245, 16),
+        (16, 117, 245),
+        (245, 16, 117),
+        (117, 16, 245),
+        (16, 245, 117),
+    ]
+    return [base_colors[index % len(base_colors)] for index in range(num_classes)]
+
+
+def prob_viz(
+    probabilities: np.ndarray,
+    actions: np.ndarray,
+    image: np.ndarray,
+    colors: list[tuple[int, int, int]],
+) -> np.ndarray:
+    """Draw horizontal probability bars, labels, and confidence scores."""
+    start_y = 104
+    bar_x = 12
+    label_x = 22
+    percent_x = 275
+    max_bar_width = 250
+    row_height = 32
+
+    for index, probability in enumerate(probabilities):
+        y1 = start_y + index * row_height
+        y2 = y1 + 24
+        bar_width = int(max_bar_width * float(probability))
+
+        cv2.rectangle(image, (bar_x, y1), (bar_x + max_bar_width, y2), (35, 35, 35), -1)
+        cv2.rectangle(image, (bar_x, y1), (bar_x + bar_width, y2), colors[index], -1)
+        cv2.putText(
+            image,
+            actions[index],
+            (label_x, y1 + 18),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (255, 255, 255),
+            1,
+            cv2.LINE_AA,
+        )
+        cv2.putText(
+            image,
+            f"{probability * 100:.0f}%",
+            (percent_x, y1 + 18),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (255, 255, 255),
+            1,
+            cv2.LINE_AA,
+        )
+
+    return image
+
+
+def draw_prediction_history(
+    image: np.ndarray,
+    prediction_history: deque[int],
+    actions: np.ndarray,
+) -> None:
+    """Draw the last 10 prediction labels on the right side of the frame."""
+    panel_width = 240
+    x1 = max(image.shape[1] - panel_width, 0)
+    cv2.rectangle(image, (x1, 104), (image.shape[1], 448), (0, 0, 0), thickness=-1)
+    cv2.putText(
+        image,
+        "Last 10 Predictions",
+        (x1 + 12, 132),
+        cv2.FONT_HERSHEY_SIMPLEX,
+        0.6,
+        (255, 255, 255),
+        2,
+        cv2.LINE_AA,
+    )
+
+    for row, prediction_index in enumerate(list(prediction_history)[-10:]):
+        cv2.putText(
+            image,
+            actions[prediction_index],
+            (x1 + 12, 164 + row * 26),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.55,
+            (180, 220, 255),
+            1,
+            cv2.LINE_AA,
+        )
+
+
+def ensure_prediction_log(log_path: Path) -> None:
+    """Create the prediction log file with a header if needed."""
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    if not log_path.exists():
+        with log_path.open("w", newline="", encoding="utf-8") as file:
+            writer = csv.writer(file)
+            writer.writerow(["timestamp", "prediction", "confidence"])
+
+
+def log_prediction(log_path: Path, prediction: str, confidence: float) -> None:
+    """Append an accepted prediction to Logs/predictions.csv."""
+    with log_path.open("a", newline="", encoding="utf-8") as file:
+        writer = csv.writer(file)
+        writer.writerow(
+            [
+                datetime.now().isoformat(timespec="seconds"),
+                prediction,
+                f"{confidence:.6f}",
+            ]
+        )
+
+
+def is_stable_prediction(predictions: deque[int], predicted_index: int) -> bool:
+    """Return True when the last 10 predictions agree with the current class."""
+    if len(predictions) < STABILIZATION_WINDOW:
+        return False
+    recent_predictions = list(predictions)[-STABILIZATION_WINDOW:]
+    return len(set(recent_predictions)) == 1 and recent_predictions[0] == predicted_index
 
 
 def update_recognition(
     state: RecognitionState,
     model: Any,
-    labels: Optional[list[str]],
+    actions: np.ndarray,
     keypoints: np.ndarray,
     sequence_length: int,
-    threshold: float,
+    log_path: Path,
 ) -> None:
-    """Append keypoints and update the displayed model prediction."""
+    """Append keypoints, run LSTM inference, smooth predictions, and update text."""
     state.sequence.append(keypoints)
-    if model is None or len(state.sequence) < sequence_length:
+    if len(state.sequence) < sequence_length:
         return
 
     input_sequence = np.expand_dims(np.array(state.sequence), axis=0)
     probabilities = model.predict(input_sequence, verbose=0)[0]
+    state.probabilities = probabilities
     prediction_index = int(np.argmax(probabilities))
     confidence = float(probabilities[prediction_index])
+    state.predictions.append(prediction_index)
     state.confidence = confidence
 
-    if labels and prediction_index < len(labels):
-        predicted_label = labels[prediction_index]
-    else:
-        predicted_label = f"class_{prediction_index}"
+    if is_stable_prediction(state.predictions, prediction_index) and confidence > state.threshold:
+        predicted_action = str(actions[prediction_index])
+        if not state.sentence or predicted_action != state.sentence[-1]:
+            state.sentence.append(predicted_action)
+            state.sentence = state.sentence[-MAX_SENTENCE_LENGTH:]
+            log_prediction(log_path, predicted_action, confidence)
+        state.accepted_label = predicted_action
 
-    if confidence >= threshold:
-        state.prediction_text = f"Prediction: {predicted_label} ({confidence:.2f})"
-    else:
-        state.prediction_text = f"Prediction: uncertain ({confidence:.2f})"
+
+def validate_model_output(model: Any, actions: np.ndarray) -> None:
+    """Ensure the loaded model output matches the available action labels."""
+    output_shape = getattr(model, "output_shape", None)
+    if output_shape is None or output_shape[-1] is None:
+        return
+
+    model_classes = int(output_shape[-1])
+    if model_classes != len(actions):
+        raise RuntimeError(
+            "Model/action mismatch: "
+            f"model outputs {model_classes} classes but {len(actions)} labels were loaded."
+        )
+
+
+def validate_keypoints_for_model(model: Any, keypoints: np.ndarray) -> None:
+    """Ensure live keypoints match the model's expected feature width."""
+    input_shape = getattr(model, "input_shape", None)
+    if input_shape is None or input_shape[-1] is None:
+        return
+
+    expected_features = int(input_shape[-1])
+    if keypoints.shape[0] != expected_features:
+        raise RuntimeError(
+            "Live keypoint/model mismatch: "
+            f"model expects {expected_features} features but extraction returned "
+            f"{keypoints.shape[0]}. Use the same keypoint extractor for collection, "
+            "training, and live inference."
+        )
+
+
+def create_threshold_slider(initial_threshold: float, disabled: bool) -> None:
+    """Create an OpenCV trackbar for real-time confidence-threshold tuning."""
+    cv2.namedWindow(WINDOW_NAME)
+    if disabled:
+        return
+    cv2.createTrackbar(
+        "Threshold %",
+        WINDOW_NAME,
+        int(max(0.0, min(initial_threshold, 1.0)) * 100),
+        100,
+        lambda _: None,
+    )
+
+
+def read_threshold_slider(current_threshold: float, disabled: bool) -> float:
+    """Read the OpenCV threshold slider as a 0.0-1.0 value."""
+    if disabled:
+        return current_threshold
+    return cv2.getTrackbarPos("Threshold %", WINDOW_NAME) / 100.0
 
 
 def run_webcam_loop(args: argparse.Namespace) -> int:
     """Run the real-time webcam processing loop."""
     model = load_tensorflow_model(args.model_path)
-    labels = load_labels(args.labels_path)
+    actions = load_actions(args.label_map_path, args.labels_path)
+    validate_model_output(model, actions)
+    ensure_prediction_log(args.prediction_log_path)
     recognition_state = RecognitionState(
         sequence=deque(maxlen=args.sequence_length),
-        prediction_text="Model: loaded" if model is not None else "Model: not loaded",
+        sentence=[],
+        predictions=deque(maxlen=STABILIZATION_WINDOW),
+        probabilities=np.zeros(len(actions), dtype=np.float32),
+        threshold=args.prediction_threshold,
     )
+    colors = generate_colors(len(actions))
 
     camera_session = open_working_camera(args)
     capture = camera_session.capture
     mp_holistic = mp.solutions.holistic
     previous_time = time.perf_counter()
     pending_frame: Optional[np.ndarray] = camera_session.first_frame
+    keypoint_shape_checked = False
+    create_threshold_slider(args.prediction_threshold, args.disable_threshold_slider)
 
     # MediaPipe Holistic tracks pose and hand landmarks across video frames.
     with mp_holistic.Holistic(
@@ -568,26 +789,36 @@ def run_webcam_loop(args: argparse.Namespace) -> int:
                 if not args.no_flip:
                     frame = cv2.flip(frame, 1)
 
-                results = process_frame(frame, holistic_model)
-                draw_landmarks(frame, results, draw_face=args.draw_face)
+                results = mediapipe_detection(frame, holistic_model)
+                draw_styled_landmarks(frame, results, draw_face=args.draw_face)
                 keypoints = extract_keypoints(results)
+                if not keypoint_shape_checked:
+                    validate_keypoints_for_model(model, keypoints)
+                    keypoint_shape_checked = True
+
+                recognition_state.threshold = read_threshold_slider(
+                    recognition_state.threshold,
+                    args.disable_threshold_slider,
+                )
                 update_recognition(
                     recognition_state,
                     model,
-                    labels,
+                    actions,
                     keypoints,
                     args.sequence_length,
-                    args.prediction_threshold,
+                    args.prediction_log_path,
                 )
 
                 current_time = time.perf_counter()
                 fps = 1.0 / max(current_time - previous_time, 1e-6)
                 previous_time = current_time
                 add_status_overlay(frame, results, fps, recognition_state)
+                prob_viz(recognition_state.probabilities, actions, frame, colors)
+                draw_prediction_history(frame, recognition_state.predictions, actions)
 
                 cv2.imshow(WINDOW_NAME, frame)
 
-                if cv2.waitKey(1) & 0xFF == ord("q"):
+                if cv2.waitKey(10) & 0xFF == ord("q"):
                     logging.info("Exit requested with q key.")
                     break
         finally:
