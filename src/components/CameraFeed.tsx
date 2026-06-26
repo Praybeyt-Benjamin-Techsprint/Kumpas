@@ -1,8 +1,15 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { Video, VideoOff } from 'lucide-react'
 
+export type CameraStatus = 'off' | 'starting' | 'live' | 'denied' | 'unsupported' | 'error'
+
 interface CameraFeedProps {
   isActive: boolean
+  footerStatus?: string
+  inferenceIntervalMs?: number
+  onFrame?: (imageDataUrl: string) => void
+  onStatusChange?: (status: CameraStatus) => void
+  onStreamChange?: (stream: MediaStream | null) => void
   theme: {
     primary: string
     glow: string
@@ -15,6 +22,8 @@ interface CameraFeedProps {
 }
 
 const TARGET_RESOLUTION = { w: 1920, h: 1080 } as const
+const INFERENCE_CAPTURE_WIDTH = 640
+const DEFAULT_INFERENCE_INTERVAL_MS = 100
 const TARGET_FPS = 30
 type Resolution = {
   w: number
@@ -28,6 +37,11 @@ const IDLE_TIMEOUT_MS = 5000
 
 const CameraFeed: React.FC<CameraFeedProps> = ({
   isActive,
+  footerStatus,
+  inferenceIntervalMs = DEFAULT_INFERENCE_INTERVAL_MS,
+  onFrame,
+  onStatusChange,
+  onStreamChange,
   onIdleTimeout,
   theme,
 }) => {
@@ -38,7 +52,13 @@ const CameraFeed: React.FC<CameraFeedProps> = ({
   const warningTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [resolution, setResolution] = useState<Resolution>(TARGET_RESOLUTION)
   const [streamError, setStreamError] = useState(false)
+  const [cameraStatus, setCameraStatus] = useState<CameraStatus>('off')
   const [showIdleWarning, setShowIdleWarning] = useState(false)
+
+  const updateCameraStatus = (status: CameraStatus) => {
+    setCameraStatus(status)
+    onStatusChange?.(status)
+  }
 
   const clearIdleTimers = () => {
     if (idleTimerRef.current) {
@@ -108,7 +128,16 @@ const CameraFeed: React.FC<CameraFeedProps> = ({
     let stream: MediaStream | null = null
 
     const startCamera = async () => {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        setStreamError(true)
+        setResolution(TARGET_RESOLUTION)
+        onStreamChange?.(null)
+        updateCameraStatus('unsupported')
+        return
+      }
+
       try {
+        updateCameraStatus('starting')
         stream = await navigator.mediaDevices.getUserMedia({
           video: {
             width: { ideal: TARGET_RESOLUTION.w },
@@ -120,6 +149,7 @@ const CameraFeed: React.FC<CameraFeedProps> = ({
 
         if (videoRef.current) {
           videoRef.current.srcObject = stream
+          await videoRef.current.play()
           const track = stream.getVideoTracks()[0]
           const settings = track.getSettings()
 
@@ -128,10 +158,19 @@ const CameraFeed: React.FC<CameraFeedProps> = ({
             h: settings.height ?? TARGET_RESOLUTION.h,
           })
           setStreamError(false)
+          onStreamChange?.(stream)
+          updateCameraStatus('live')
         }
-      } catch {
+      } catch (error) {
+        const errorName = error instanceof DOMException ? error.name : ''
         setStreamError(true)
         setResolution(TARGET_RESOLUTION)
+        onStreamChange?.(null)
+        updateCameraStatus(
+          errorName === 'NotAllowedError' || errorName === 'PermissionDeniedError'
+            ? 'denied'
+            : 'error',
+        )
       }
     }
 
@@ -141,6 +180,8 @@ const CameraFeed: React.FC<CameraFeedProps> = ({
         activeStream.getTracks().forEach((track) => track.stop())
         videoRef.current.srcObject = null
       }
+      onStreamChange?.(null)
+      updateCameraStatus('off')
     }
 
     if (isActive) {
@@ -153,8 +194,9 @@ const CameraFeed: React.FC<CameraFeedProps> = ({
       if (stream) {
         stream.getTracks().forEach((track) => track.stop())
       }
+      onStreamChange?.(null)
     }
-  }, [isActive])
+  }, [isActive, onStatusChange, onStreamChange])
 
   useEffect(() => {
     if (!isActive) {
@@ -173,6 +215,44 @@ const CameraFeed: React.FC<CameraFeedProps> = ({
       setShowIdleWarning(false)
     }
   }, [isActive])
+
+  useEffect(() => {
+    if (!isActive || cameraStatus !== 'live' || !onFrame) return
+
+    const captureFrame = () => {
+      const video = videoRef.current
+      const canvas = canvasRef.current
+      if (!video || !canvas || video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
+        return
+      }
+
+      const sourceWidth = video.videoWidth || resolution.w
+      const sourceHeight = video.videoHeight || resolution.h
+      if (!sourceWidth || !sourceHeight) return
+
+      const scale = INFERENCE_CAPTURE_WIDTH / sourceWidth
+      canvas.width = INFERENCE_CAPTURE_WIDTH
+      canvas.height = Math.round(sourceHeight * scale)
+
+      const context = canvas.getContext('2d')
+      if (!context) return
+
+      context.drawImage(video, 0, 0, canvas.width, canvas.height)
+      onFrame(canvas.toDataURL('image/jpeg', 0.72))
+    }
+
+    const intervalId = window.setInterval(captureFrame, inferenceIntervalMs)
+    return () => window.clearInterval(intervalId)
+  }, [cameraStatus, inferenceIntervalMs, isActive, onFrame, resolution.h, resolution.w])
+
+  const cameraMessage =
+    cameraStatus === 'starting'
+      ? 'Starting camera'
+      : cameraStatus === 'denied'
+        ? 'Camera permission denied'
+        : cameraStatus === 'unsupported'
+          ? 'Camera unavailable'
+          : 'Camera unavailable'
 
   return (
     <div
@@ -278,7 +358,7 @@ const CameraFeed: React.FC<CameraFeedProps> = ({
                     className="font-inter text-xs"
                     style={{ color: theme.text, opacity: 0.4 }}
                   >
-                    Camera permission denied
+                    {cameraMessage}
                   </span>
                 </>
               ) : (
@@ -346,6 +426,20 @@ const CameraFeed: React.FC<CameraFeedProps> = ({
         >
           {TARGET_FPS} FPS
         </span>
+        {footerStatus && (
+          <span
+            className="ml-auto whitespace-nowrap font-inter font-normal uppercase"
+            style={{
+              color: theme.text,
+              opacity: 0.75,
+              fontSize: '10px',
+              fontVariantNumeric: 'tabular-nums',
+              transition: THEME_TRANSITION,
+            }}
+          >
+            {footerStatus}
+          </span>
+        )}
       </div>
     </div>
   )

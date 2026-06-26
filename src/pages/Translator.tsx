@@ -1,12 +1,25 @@
-import React, { useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ShieldCheck } from 'lucide-react'
 import { Link, useNavigate } from 'react-router-dom'
-import CameraFeed from '../components/CameraFeed'
+import CameraFeed, { CameraStatus } from '../components/CameraFeed'
 import SignCard from '../components/SignCard'
 import TranslationOutput, { Language } from '../components/TranslationOutput'
 
-const PLACEHOLDER_TEXT =
-  'Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat...'
+const INFERENCE_API_URL = 'http://127.0.0.1:8765'
+
+type InferenceResponse = {
+  ok: boolean
+  error?: string
+  phase?: string
+  sequenceLength?: number
+  recordingFrames?: number
+  handsVisible?: boolean
+  isMoving?: boolean
+  motionScore?: number
+  prediction?: string
+  confidence?: number
+  sentence?: string[]
+}
 
 const DIALECT_THEME: Record<
   Language,
@@ -141,9 +154,13 @@ const TERMS_SUMMARY = [
 
 const Translator: React.FC = () => {
   const [isActive, setIsActive] = useState(false)
+  const [cameraStatus, setCameraStatus] = useState<CameraStatus>('off')
+  const [hasCameraStream, setHasCameraStream] = useState(false)
   const [hasAcceptedTerms, setHasAcceptedTerms] = useState(false)
+  const [inferenceState, setInferenceState] = useState<InferenceResponse | null>(null)
+  const [inferenceError, setInferenceError] = useState('')
   const [selectedLang, setSelectedLang] = useState<Language>('Filipino')
-  const [translationText] = useState(PLACEHOLDER_TEXT)
+  const requestInFlight = useRef(false)
   const navigate = useNavigate()
   const theme = DIALECT_THEME[selectedLang]
 
@@ -151,6 +168,76 @@ const Translator: React.FC = () => {
     setIsActive(false)
     navigate('/', { replace: true })
   }
+
+  const handleCameraStatusChange = useCallback((status: CameraStatus) => {
+    setCameraStatus(status)
+  }, [])
+
+  const handleCameraStreamChange = useCallback((stream: MediaStream | null) => {
+    setHasCameraStream(Boolean(stream))
+  }, [])
+
+  const handleCameraFrame = useCallback(async (imageDataUrl: string) => {
+    if (requestInFlight.current) return
+
+    requestInFlight.current = true
+    try {
+      const response = await fetch(`${INFERENCE_API_URL}/predict`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ image: imageDataUrl }),
+      })
+      const payload = (await response.json()) as InferenceResponse
+      if (!response.ok || !payload.ok) {
+        throw new Error(payload.error || 'Inference request failed.')
+      }
+      setInferenceState(payload)
+      setInferenceError('')
+    } catch (error) {
+      setInferenceError(error instanceof Error ? error.message : 'Inference server unavailable.')
+    } finally {
+      requestInFlight.current = false
+    }
+  }, [])
+
+  useEffect(() => {
+    if (isActive) return
+    setInferenceState(null)
+    setInferenceError('')
+    requestInFlight.current = false
+    void fetch(`${INFERENCE_API_URL}/reset`, { method: 'POST' }).catch(() => {
+      // The Python inference server may not be running yet.
+    })
+  }, [isActive])
+
+  const translationText = useMemo(() => {
+    if (!isActive || cameraStatus === 'off') return ''
+    if (cameraStatus === 'starting') return 'Starting camera...'
+    if (cameraStatus === 'denied') return 'Camera permission denied.'
+    if (cameraStatus === 'unsupported') return 'Camera is unavailable in this browser.'
+    if (cameraStatus === 'error') return 'Camera could not be started.'
+    if (inferenceError) return `TensorFlow server: ${inferenceError}`
+    if (inferenceState?.sentence?.length) return inferenceState.sentence.join(' ')
+    if (inferenceState?.phase === 'RECORDING') return ''
+    if (inferenceState?.phase === 'WAITING_FOR_RESET') {
+      return inferenceState.prediction
+        ? `${inferenceState.prediction} (${Math.round((inferenceState.confidence ?? 0) * 100)}%)`
+        : 'Prediction complete.'
+    }
+    if (hasCameraStream) return 'Waiting for movement...'
+    return ''
+  }, [cameraStatus, hasCameraStream, inferenceError, inferenceState, isActive])
+
+  const cameraFooterStatus = useMemo(() => {
+    if (!isActive || cameraStatus !== 'live') return ''
+    if (inferenceError) return 'TensorFlow server offline'
+    if (inferenceState?.phase === 'RECORDING') {
+      return `Recording: ${inferenceState.recordingFrames ?? 0}/${inferenceState.sequenceLength ?? 30} frames`
+    }
+    if (inferenceState?.phase === 'WAITING_FOR_RESET') return 'Stop movement to reset'
+    if (hasCameraStream) return 'Waiting for movement'
+    return ''
+  }, [cameraStatus, hasCameraStream, inferenceError, inferenceState, isActive])
 
   return (
     <main
@@ -243,9 +330,13 @@ const Translator: React.FC = () => {
           }}
         >
           <CameraFeed
+            footerStatus={cameraFooterStatus}
             isActive={isActive}
-            theme={theme}
+            onFrame={handleCameraFrame}
             onIdleTimeout={() => setIsActive(false)}
+            onStatusChange={handleCameraStatusChange}
+            onStreamChange={handleCameraStreamChange}
+            theme={theme}
           />
 
           <div className="flex justify-center pb-6 pt-2">

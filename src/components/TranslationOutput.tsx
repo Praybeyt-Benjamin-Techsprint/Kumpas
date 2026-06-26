@@ -14,6 +14,15 @@ export type Language = (typeof LANGUAGES)[number]
 
 const FONT_SIZE_VALUES = [13, 15, 18, 22] as const
 
+const TTS_LANGUAGE_CODE: Record<Language, string> = {
+  Filipino: 'fil-PH',
+  Cebuano: 'ceb-PH',
+  Ilocano: 'ilo-PH',
+  Waray: 'war-PH',
+  Hiligaynon: 'hil-PH',
+  Kapampangan: 'pam-PH',
+}
+
 interface TranslationTheme {
   primary: string
   glow: string
@@ -84,7 +93,7 @@ const TranslationOutput: React.FC<TranslationOutputProps> = ({
     if (!translationText || !window.speechSynthesis) return
     window.speechSynthesis.cancel()
     const utterance = new SpeechSynthesisUtterance(translationText)
-    utterance.lang = 'fil-PH'
+    utterance.lang = TTS_LANGUAGE_CODE[selectedLang] ?? 'fil-PH'
     utterance.onstart = () => setIsSpeaking(true)
     utterance.onend = () => setIsSpeaking(false)
     utterance.onerror = () => setIsSpeaking(false)
