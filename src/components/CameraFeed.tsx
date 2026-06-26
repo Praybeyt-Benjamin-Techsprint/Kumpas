@@ -11,6 +11,7 @@ interface CameraFeedProps {
     bgPanel: string
     bgDeep: string
   }
+  onIdleTimeout: () => void
 }
 
 const TARGET_RESOLUTION = { w: 1920, h: 1080 } as const
@@ -21,11 +22,87 @@ type Resolution = {
 }
 const THEME_TRANSITION =
   'background-color 0.5s ease, border-color 0.4s ease, color 0.4s ease'
+const IDLE_THRESHOLD = 30
+const IDLE_DIFF_PERCENT = 0.98
+const IDLE_TIMEOUT_MS = 5000
 
-const CameraFeed: React.FC<CameraFeedProps> = ({ isActive, theme }) => {
+const CameraFeed: React.FC<CameraFeedProps> = ({
+  isActive,
+  onIdleTimeout,
+  theme,
+}) => {
   const videoRef = useRef<HTMLVideoElement>(null)
+  const canvasRef = useRef<HTMLCanvasElement>(null)
+  const lastFrameDataRef = useRef<ImageData | null>(null)
+  const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const warningTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const [resolution, setResolution] = useState<Resolution>(TARGET_RESOLUTION)
   const [streamError, setStreamError] = useState(false)
+  const [showIdleWarning, setShowIdleWarning] = useState(false)
+
+  const clearIdleTimers = () => {
+    if (idleTimerRef.current) {
+      clearTimeout(idleTimerRef.current)
+      idleTimerRef.current = null
+    }
+
+    if (warningTimerRef.current) {
+      clearTimeout(warningTimerRef.current)
+      warningTimerRef.current = null
+    }
+  }
+
+  const resetIdleTimer = () => {
+    clearIdleTimers()
+    setShowIdleWarning(false)
+
+    warningTimerRef.current = setTimeout(() => {
+      setShowIdleWarning(true)
+    }, IDLE_TIMEOUT_MS - 2000)
+
+    idleTimerRef.current = setTimeout(() => {
+      setShowIdleWarning(false)
+      onIdleTimeout()
+    }, IDLE_TIMEOUT_MS)
+  }
+
+  const checkMotion = () => {
+    const video = videoRef.current
+    const canvas = canvasRef.current
+    if (!video || !canvas || video.readyState < 2) return
+
+    const ctx = canvas.getContext('2d')
+    if (!ctx) return
+
+    canvas.width = 160
+    canvas.height = 90
+    ctx.drawImage(video, 0, 0, 160, 90)
+    const currentFrame = ctx.getImageData(0, 0, 160, 90)
+
+    if (lastFrameDataRef.current) {
+      const previous = lastFrameDataRef.current.data
+      const current = currentFrame.data
+      let samePixels = 0
+      const total = current.length / 4
+
+      for (let index = 0; index < current.length; index += 4) {
+        const dr = Math.abs(current[index] - previous[index])
+        const dg = Math.abs(current[index + 1] - previous[index + 1])
+        const db = Math.abs(current[index + 2] - previous[index + 2])
+
+        if (dr < IDLE_THRESHOLD && dg < IDLE_THRESHOLD && db < IDLE_THRESHOLD) {
+          samePixels++
+        }
+      }
+
+      const idleRatio = samePixels / total
+      if (idleRatio < IDLE_DIFF_PERCENT) {
+        resetIdleTimer()
+      }
+    }
+
+    lastFrameDataRef.current = currentFrame
+  }
 
   useEffect(() => {
     let stream: MediaStream | null = null
@@ -79,6 +156,24 @@ const CameraFeed: React.FC<CameraFeedProps> = ({ isActive, theme }) => {
     }
   }, [isActive])
 
+  useEffect(() => {
+    if (!isActive) {
+      clearIdleTimers()
+      setShowIdleWarning(false)
+      lastFrameDataRef.current = null
+      return
+    }
+
+    resetIdleTimer()
+    const motionInterval = setInterval(checkMotion, 500)
+
+    return () => {
+      clearInterval(motionInterval)
+      clearIdleTimers()
+      setShowIdleWarning(false)
+    }
+  }, [isActive])
+
   return (
     <div
       className="flex h-full flex-col"
@@ -119,7 +214,7 @@ const CameraFeed: React.FC<CameraFeedProps> = ({ isActive, theme }) => {
           className="relative h-full w-full overflow-visible"
           style={{
             backgroundColor: theme.bgDeep,
-            border: `1px solid ${theme.primary}59`,
+            border: `1px solid ${theme.primary}`,
             boxShadow:
               `inset 0 0 30px rgba(0,0,0,0.9), 0 0 8px ${theme.glow}`,
             transition: THEME_TRANSITION,
@@ -191,8 +286,33 @@ const CameraFeed: React.FC<CameraFeedProps> = ({ isActive, theme }) => {
               )}
             </div>
           )}
+
+          {showIdleWarning && isActive && (
+            <div
+              style={{
+                position: 'absolute',
+                bottom: '12px',
+                left: '50%',
+                transform: 'translateX(-50%)',
+                background: 'rgba(0,0,0,0.75)',
+                border: `1px solid ${theme.primary}`,
+                borderRadius: '6px',
+                padding: '6px 14px',
+                fontSize: '11px',
+                color: theme.text,
+                fontFamily: 'Inter, sans-serif',
+                letterSpacing: '0.08em',
+                whiteSpace: 'nowrap',
+                zIndex: 20,
+              }}
+            >
+              Camera turning off due to inactivity...
+            </div>
+          )}
         </div>
       </div>
+
+      <canvas ref={canvasRef} style={{ display: 'none' }} />
 
       <div
         className="flex items-center gap-4 px-5 pb-3"

@@ -13,9 +13,15 @@ const Navbar: React.FC = () => {
     <header
       className="flex min-h-[56px] w-full items-center justify-between px-4 py-2"
       style={{
+        position: 'sticky',
+        top: 0,
+        zIndex: 1000,
         background:
           'linear-gradient(180deg, #8A6B0E 0%, #C49A14 35%, #B8920F 100%)',
         borderBottom: '2px solid #8A6B0E',
+        boxShadow:
+          '0 4px 24px 0 rgba(0,0,0,0.5), 0 1px 0 rgba(196,154,20,0.18)',
+        filter: 'drop-shadow(0 6px 1px rgba(0,0,0,0.5))',
       }}
     >
       <div className="flex items-center gap-3">

@@ -35,10 +35,10 @@ const Home: React.FC = () => {
         <div className="mx-auto grid max-w-6xl gap-10 md:grid-cols-[1.1fr_0.9fr] md:items-center">
           <div>
             <p className="font-inter text-[11px] font-medium uppercase text-gold/70 tracking-[0.12em]">
-              Filipino Sign Language Translator
+              Breaking barriers in Filipino Sign Language
             </p>
             <h1 className="mt-5 max-w-4xl font-cinzel text-4xl font-bold leading-tight text-gold-light md:text-6xl">
-              Breaking barriers in Filipino Sign Language
+              Filipino Sign Language Translator
             </h1>
             <p className="mt-6 max-w-3xl font-inter text-base leading-8 text-gold-light/80 md:text-lg">
               KUMPAS uses machine learning to recognize Filipino Sign Language
@@ -134,7 +134,7 @@ const Home: React.FC = () => {
       <section className="px-6 pb-16">
         <div className="mx-auto max-w-6xl">
           <p className="font-inter text-[11px] font-medium uppercase text-gold/70 tracking-[0.12em]">
-            Supported Languages
+            Supported Philippine Dialects
           </p>
           <div className="mt-6 flex flex-wrap gap-3">
             {languages.map((language) => (

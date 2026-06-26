@@ -1,5 +1,5 @@
-import React, { useState } from 'react'
-import { ChevronDown, Copy, Volume2 } from 'lucide-react'
+import React, { useEffect, useState } from 'react'
+import { ChevronDown, Copy, Square, Volume2 } from 'lucide-react'
 
 export const LANGUAGES = [
   'Filipino',
@@ -11,6 +11,8 @@ export const LANGUAGES = [
 ] as const
 
 export type Language = (typeof LANGUAGES)[number]
+
+const FONT_SIZE_VALUES = [13, 15, 18, 22] as const
 
 interface TranslationTheme {
   primary: string
@@ -38,6 +40,34 @@ const TranslationOutput: React.FC<TranslationOutputProps> = ({
 }) => {
   const [showDropdown, setShowDropdown] = useState(false)
   const [copied, setCopied] = useState(false)
+  const [isSpeaking, setIsSpeaking] = useState(false)
+  const [fontSizeStep, setFontSizeStep] = useState<number>(1)
+
+  useEffect(() => {
+    window.speechSynthesis.cancel()
+    setIsSpeaking(false)
+  }, [selectedLang])
+
+  useEffect(() => {
+    const handleVisibilityChange = () => {
+      if (document.hidden) {
+        window.speechSynthesis.cancel()
+        setIsSpeaking(false)
+      }
+    }
+
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+    }
+  }, [])
+
+  useEffect(() => {
+    return () => {
+      window.speechSynthesis.cancel()
+    }
+  }, [])
 
   const handleCopy = async () => {
     if (!translationText) return
@@ -52,9 +82,18 @@ const TranslationOutput: React.FC<TranslationOutputProps> = ({
 
   const handleSpeak = () => {
     if (!translationText || !window.speechSynthesis) return
+    window.speechSynthesis.cancel()
     const utterance = new SpeechSynthesisUtterance(translationText)
     utterance.lang = 'fil-PH'
+    utterance.onstart = () => setIsSpeaking(true)
+    utterance.onend = () => setIsSpeaking(false)
+    utterance.onerror = () => setIsSpeaking(false)
     window.speechSynthesis.speak(utterance)
+  }
+
+  const handleStop = () => {
+    window.speechSynthesis.cancel()
+    setIsSpeaking(false)
   }
 
   const dividerBackground = (direction: 'left' | 'right') =>
@@ -155,7 +194,7 @@ const TranslationOutput: React.FC<TranslationOutputProps> = ({
               className="font-inter font-normal"
               style={{
                 color: theme.text,
-                fontSize: '15px',
+                fontSize: `${FONT_SIZE_VALUES[fontSizeStep]}px`,
                 lineHeight: 1.75,
                 opacity: 0.9,
                 textAlign: 'left',
@@ -209,7 +248,7 @@ const TranslationOutput: React.FC<TranslationOutputProps> = ({
           </div>
         </div>
 
-        <div className="flex items-center justify-between px-1">
+        <div className="flex items-center justify-between gap-3 px-1">
           <button
             onClick={handleCopy}
             title="Copy text"
@@ -223,6 +262,58 @@ const TranslationOutput: React.FC<TranslationOutputProps> = ({
           >
             <Copy size={16} style={{ color: copied ? '#fff' : theme.primary }} />
           </button>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+            <button
+              onClick={() => setFontSizeStep((previous) => Math.max(0, previous - 1))}
+              disabled={fontSizeStep === 0}
+              title="Decrease text size"
+              className="icon-btn"
+              style={{
+                color: theme.primary,
+                cursor: fontSizeStep === 0 ? 'not-allowed' : 'pointer',
+                fontFamily: 'Inter, sans-serif',
+                fontSize: '16px',
+                fontWeight: 500,
+                opacity: fontSizeStep === 0 ? 0.35 : 1,
+              }}
+            >
+              -
+            </button>
+            <button
+              onClick={() => setFontSizeStep((previous) => Math.min(3, previous + 1))}
+              disabled={fontSizeStep === 3}
+              title="Increase text size"
+              className="icon-btn"
+              style={{
+                color: theme.primary,
+                cursor: fontSizeStep === 3 ? 'not-allowed' : 'pointer',
+                fontFamily: 'Inter, sans-serif',
+                fontSize: '16px',
+                fontWeight: 500,
+                opacity: fontSizeStep === 3 ? 0.35 : 1,
+              }}
+            >
+              +
+            </button>
+          </div>
+
+          {isSpeaking && (
+            <button
+              onClick={handleStop}
+              title="Stop reading"
+              className="icon-btn"
+              style={{
+                borderColor: 'rgba(224,85,85,0.5)',
+                boxShadow: '0 0 10px rgba(224,85,85,0.25)',
+                color: '#E05555',
+                cursor: 'pointer',
+                transition: `${THEME_TRANSITION}, font-size 0.2s ease`,
+              }}
+            >
+              <Square size={16} style={{ color: '#E05555' }} />
+            </button>
+          )}
 
           <button
             onClick={handleSpeak}
