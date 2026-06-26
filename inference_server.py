@@ -18,7 +18,6 @@ from pathlib import Path
 from typing import Any, Optional
 
 import cv2
-import mediapipe as mp
 import numpy as np
 
 from sign_language import (
@@ -37,6 +36,7 @@ from sign_language import (
     load_actions,
     load_tensorflow_model,
     mediapipe_detection,
+    require_mediapipe_solutions,
     resolve_sequence_length_for_model,
     update_recognition_state,
     validate_keypoints_for_model,
@@ -70,7 +70,7 @@ class InferenceRuntime:
             threshold=args.prediction_threshold,
         )
         self.keypoint_shape_checked = False
-        self.mp_holistic = mp.solutions.holistic
+        self.mp_holistic = require_mediapipe_solutions().holistic
         self.holistic_model = self.mp_holistic.Holistic(
             static_image_mode=False,
             model_complexity=args.model_complexity,
@@ -183,6 +183,10 @@ class InferenceRequestHandler(BaseHTTPRequestHandler):
                     "ok": True,
                     "sequenceLength": self.runtime.sequence_length,
                     "labels": list(map(str, self.runtime.actions)),
+                    "labelCount": len(self.runtime.actions),
+                    "modelPath": str(self.runtime.args.model_path),
+                    "labelMapPath": str(self.runtime.args.label_map_path),
+                    "flip": self.runtime.args.flip,
                 }
             )
             return
@@ -197,19 +201,32 @@ class InferenceRequestHandler(BaseHTTPRequestHandler):
                 self.send_error_json(HTTPStatus.NOT_FOUND, "Unknown route.")
                 return
 
-            payload = self.read_json_body()
-            image_value = payload.get("image")
-            if not isinstance(image_value, str) or not image_value:
-                self.send_error_json(HTTPStatus.BAD_REQUEST, "Missing image payload.")
-                return
-
-            frame = decode_frame(parse_data_url(image_value))
+            frame = decode_frame(self.read_image_body())
             self.send_json(self.runtime.process_frame(frame))
         except ValueError as exc:
             self.send_error_json(HTTPStatus.BAD_REQUEST, str(exc))
         except Exception as exc:  # noqa: BLE001 - keep server alive and report JSON.
             logging.exception("Inference request failed")
             self.send_error_json(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
+
+    def read_image_body(self) -> bytes:
+        content_type = self.headers.get("Content-Type", "").split(";", 1)[0].strip()
+        if content_type in {"image/jpeg", "image/png", "application/octet-stream"}:
+            return self.read_raw_body()
+
+        payload = self.read_json_body()
+        image_value = payload.get("image")
+        if not isinstance(image_value, str) or not image_value:
+            raise ValueError("Missing image payload.")
+        return parse_data_url(image_value)
+
+    def read_raw_body(self) -> bytes:
+        content_length = int(self.headers.get("Content-Length", "0"))
+        if content_length <= 0:
+            raise ValueError("Missing request body.")
+        if content_length > MAX_BODY_BYTES:
+            raise ValueError("Request body is too large.")
+        return self.rfile.read(content_length)
 
     def read_json_body(self) -> dict[str, Any]:
         content_length = int(self.headers.get("Content-Length", "0"))

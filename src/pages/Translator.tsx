@@ -18,7 +18,11 @@ type InferenceResponse = {
   motionScore?: number
   prediction?: string
   confidence?: number
+  topPrediction?: string
+  topConfidence?: number
   sentence?: string[]
+  labelCount?: number
+  flip?: boolean
 }
 
 const DIALECT_THEME: Record<
@@ -161,6 +165,7 @@ const Translator: React.FC = () => {
   const [inferenceError, setInferenceError] = useState('')
   const [selectedLang, setSelectedLang] = useState<Language>('Filipino')
   const requestInFlight = useRef(false)
+  const pendingFrameRef = useRef<Blob | null>(null)
   const navigate = useNavigate()
   const theme = DIALECT_THEME[selectedLang]
 
@@ -177,15 +182,13 @@ const Translator: React.FC = () => {
     setHasCameraStream(Boolean(stream))
   }, [])
 
-  const handleCameraFrame = useCallback(async (imageDataUrl: string) => {
-    if (requestInFlight.current) return
-
+  const sendInferenceFrame = useCallback(async (imageBlob: Blob) => {
     requestInFlight.current = true
     try {
       const response = await fetch(`${INFERENCE_API_URL}/predict`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ image: imageDataUrl }),
+        headers: { 'Content-Type': imageBlob.type || 'image/jpeg' },
+        body: imageBlob,
       })
       const payload = (await response.json()) as InferenceResponse
       if (!response.ok || !payload.ok) {
@@ -197,14 +200,29 @@ const Translator: React.FC = () => {
       setInferenceError(error instanceof Error ? error.message : 'Inference server unavailable.')
     } finally {
       requestInFlight.current = false
+      const pendingFrame = pendingFrameRef.current
+      pendingFrameRef.current = null
+      if (pendingFrame) {
+        void sendInferenceFrame(pendingFrame)
+      }
     }
   }, [])
+
+  const handleCameraFrame = useCallback((imageBlob: Blob) => {
+    if (requestInFlight.current) {
+      pendingFrameRef.current = imageBlob
+      return
+    }
+
+    void sendInferenceFrame(imageBlob)
+  }, [sendInferenceFrame])
 
   useEffect(() => {
     if (isActive) return
     setInferenceState(null)
     setInferenceError('')
     requestInFlight.current = false
+    pendingFrameRef.current = null
     void fetch(`${INFERENCE_API_URL}/reset`, { method: 'POST' }).catch(() => {
       // The Python inference server may not be running yet.
     })
@@ -235,6 +253,9 @@ const Translator: React.FC = () => {
       return `Recording: ${inferenceState.recordingFrames ?? 0}/${inferenceState.sequenceLength ?? 30} frames`
     }
     if (inferenceState?.phase === 'WAITING_FOR_RESET') return 'Stop movement to reset'
+    if (inferenceState?.topPrediction) {
+      return `Top: ${inferenceState.topPrediction} ${Math.round((inferenceState.topConfidence ?? 0) * 100)}%`
+    }
     if (hasCameraStream) return 'Waiting for movement'
     return ''
   }, [cameraStatus, hasCameraStream, inferenceError, inferenceState, isActive])

@@ -11,8 +11,11 @@ import argparse
 import csv
 import json
 import logging
+import os
 import platform
+import shutil
 import sys
+import tempfile
 import time
 from collections import deque
 from dataclasses import dataclass
@@ -22,6 +25,9 @@ from pathlib import Path
 from typing import Any, Optional
 
 try:
+    os.environ.setdefault("MPLCONFIGDIR", ".cache/matplotlib")
+    os.makedirs(os.environ["MPLCONFIGDIR"], exist_ok=True)
+
     import cv2
     import mediapipe as mp
     import numpy as np
@@ -403,6 +409,20 @@ def mediapipe_detection(image, holistic_model):
     return results
 
 
+def require_mediapipe_solutions() -> Any:
+    """Return MediaPipe Solutions or raise a setup-specific error."""
+    solutions = getattr(mp, "solutions", None)
+    if solutions is None:
+        raise RuntimeError(
+            "This MediaPipe install does not expose mp.solutions, which this "
+            "project uses for Holistic hand tracking. Recreate the project "
+            "environment with a compatible Python version and requirements, "
+            "for example: python3.11 -m venv .venv311 && source .venv311/bin/activate "
+            "&& python -m pip install -r requirements.txt"
+        )
+    return solutions
+
+
 def extract_keypoints(results) -> np.ndarray:
     """Extract hand landmarks in the same 126-value format used for training."""
     left_hand = (
@@ -513,9 +533,10 @@ def hands_are_visible(results) -> bool:
 
 def draw_styled_landmarks(image, results, draw_face: bool = False) -> None:
     """Draw pose, hand, and optionally face landmarks on the frame."""
-    mp_holistic = mp.solutions.holistic
-    mp_drawing = mp.solutions.drawing_utils
-    mp_styles = mp.solutions.drawing_styles
+    mp_solutions = require_mediapipe_solutions()
+    mp_holistic = mp_solutions.holistic
+    mp_drawing = mp_solutions.drawing_utils
+    mp_styles = mp_solutions.drawing_styles
 
     if results.pose_landmarks:
         mp_drawing.draw_landmarks(
@@ -696,7 +717,51 @@ def load_tensorflow_model(model_path: Path) -> Any:
         ) from exc
 
     logging.info("Loading TensorFlow model from %s", model_path)
-    return load_model(model_path, compile=False)
+    try:
+        return load_model(model_path, compile=False)
+    except TypeError as exc:
+        if "input_axes" not in str(exc) and "output_axes" not in str(exc):
+            raise
+        logging.warning(
+            "Model config contains newer Keras initializer fields; loading "
+            "through a sanitized temporary H5 copy."
+        )
+        return load_model_sanitized_h5(model_path, load_model)
+
+
+def remove_keras_initializer_axis_keys(value: Any) -> Any:
+    """Remove newer Keras config keys unsupported by older local loaders."""
+    if isinstance(value, dict):
+        return {
+            key: remove_keras_initializer_axis_keys(item)
+            for key, item in value.items()
+            if key not in {"input_axes", "output_axes", "quantization_config"}
+        }
+    if isinstance(value, list):
+        return [remove_keras_initializer_axis_keys(item) for item in value]
+    return value
+
+
+def load_model_sanitized_h5(model_path: Path, load_model: Any) -> Any:
+    """Load an H5 model after sanitizing a temporary copy of model_config."""
+    import h5py
+
+    with tempfile.NamedTemporaryFile(suffix=".h5") as temp_file:
+        temp_path = Path(temp_file.name)
+        shutil.copy2(model_path, temp_path)
+
+        with h5py.File(temp_path, "r+") as h5_file:
+            raw_config = h5_file.attrs.get("model_config")
+            if raw_config is None:
+                raise RuntimeError(f"Model config missing from H5 file: {model_path}")
+            if isinstance(raw_config, bytes):
+                raw_config = raw_config.decode("utf-8")
+
+            config = json.loads(raw_config)
+            sanitized_config = remove_keras_initializer_axis_keys(config)
+            h5_file.attrs.modify("model_config", json.dumps(sanitized_config))
+
+        return load_model(temp_path, compile=False)
 
 
 def generate_colors(num_classes: int) -> list[tuple[int, int, int]]:
@@ -1008,7 +1073,7 @@ def run_webcam_loop(args: argparse.Namespace) -> int:
 
     camera_session = open_working_camera(args)
     capture = camera_session.capture
-    mp_holistic = mp.solutions.holistic
+    mp_holistic = require_mediapipe_solutions().holistic
     previous_time = time.perf_counter()
     pending_frame: Optional[np.ndarray] = camera_session.first_frame
     keypoint_shape_checked = False

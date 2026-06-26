@@ -7,7 +7,7 @@ interface CameraFeedProps {
   isActive: boolean
   footerStatus?: string
   inferenceIntervalMs?: number
-  onFrame?: (imageDataUrl: string) => void
+  onFrame?: (imageBlob: Blob) => void
   onStatusChange?: (status: CameraStatus) => void
   onStreamChange?: (stream: MediaStream | null) => void
   theme: {
@@ -22,8 +22,9 @@ interface CameraFeedProps {
 }
 
 const TARGET_RESOLUTION = { w: 1920, h: 1080 } as const
-const INFERENCE_CAPTURE_WIDTH = 640
-const DEFAULT_INFERENCE_INTERVAL_MS = 100
+const INFERENCE_CAPTURE_WIDTH = 960
+const INFERENCE_JPEG_QUALITY = 0.9
+const DEFAULT_INFERENCE_INTERVAL_MS = 33
 const TARGET_FPS = 30
 type Resolution = {
   w: number
@@ -238,7 +239,13 @@ const CameraFeed: React.FC<CameraFeedProps> = ({
       if (!context) return
 
       context.drawImage(video, 0, 0, canvas.width, canvas.height)
-      onFrame(canvas.toDataURL('image/jpeg', 0.72))
+      canvas.toBlob(
+        (blob) => {
+          if (blob) onFrame(blob)
+        },
+        'image/jpeg',
+        INFERENCE_JPEG_QUALITY,
+      )
     }
 
     const intervalId = window.setInterval(captureFrame, inferenceIntervalMs)
