@@ -13,7 +13,11 @@ It produces:
     X: sequence features shaped as (samples, sequence_length, keypoints)
     y: one-hot labels shaped as (samples, number_of_actions)
     X_train, X_test, y_train, y_test: train/test partitions
+
+    
 """
+
+
 
 from __future__ import annotations
 
@@ -46,43 +50,17 @@ ACTIONS = [
     "please",
     "want",
     "what",
-    "again",
-    "eat",
     "eat_food",
     "more",
     "go_to",
     "fine",
     "like",
-    "learn",
     "name",
     "meet",
     "nice",
-    "a",
-    "b",
-    "c",
-    "d",
-    "e",
-    "f",
-    "g",
-    "h",
-    "i",
-    "j",
-    "k",
-    "l",
-    "m",
-    "n",
-    "o",
-    "p",
-    "q",
-    "r",
-    "s",
-    "t",
-    "u",
-    "v",
-    "w",
-    "x",
-    "y",
-    "z",
+    "Sorry", 
+    "where",
+    "call",
 ]
 SEQUENCE_LENGTH = 30
 TEST_SIZE = 0.2
